@@ -149,10 +149,10 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
                             o("valid request from %s\n", ip);
                             ez_packet(client_sock, "250 OK\r\n", ip);
                         }
-                        else if (!strncasecmp(buf, "ehlo ", 5))
+                        else if (!strncasecmp(buf, "ehlo ", 5) || !strncasecmp(buf, "starttls", 8))
                         {
                             o("valid request from %s\n", ip);
-                            ez_packet(client_sock, "502 ESMTP Not Supported\r\n", ip);
+                            ez_packet(client_sock, "502 NOT SUPPORTED\r\n", ip);
                         }
                         else if (!strncasecmp(buf, "quit\r\n", 6))
                         {
@@ -163,13 +163,13 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
                         else if (!strncasecmp(buf, "data\r\n", 6))
                         {
                             o("valid request from %s\n", ip);
-                            ez_packet(client_sock, "354\r\n", ip);
+                            ez_packet(client_sock, "354 GO AHEAD\r\n", ip);
                             body = 1;
                         }
                         else
                         {
                             o("invalid request from %s\n", ip);
-                            ez_packet(client_sock, "250 OK\r\n", ip); // tell them it was ok anyway LOL
+                            ez_packet(client_sock, "250 OK\r\n", ip);
                         }
                     }
                 }
