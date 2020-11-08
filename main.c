@@ -14,25 +14,27 @@ typedef   float           r32    ;   typedef   double       r64    ;
 //----------------------------------------------------------------------------------------------------------------------
 #include <errno.h>
 #include <fcntl.h>
-#include <stdio.h>
+#include <inttypes.h>
+#include <semaphore.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <inttypes.h>
 #include <sys/mman.h>
 #include <arpa/inet.h>
 #include <netinet/tcp.h>
 //----------------------------------------------------------------------------------------------------------------------
-#define ENABLE_OUTPUT     1
-#define MAX_LISTEN      100
-#define BUFSIZE       65536
-#define MAXSIZE     1048576
+#define ENABLE_OUTPUT       1
+#define MAX_LISTEN        100
+#define BUFSIZE         16384
+#define MAXSIZE         65536
 //----------------------------------------------------------------------------------------------------------------------
 void pump(struct sockaddr_in * const restrict, const si);                               // network pump
 void ez_packet(const si socket, s8 const * const restrict, s8 const * const restrict);  // smtp ez-send
 void o(s8 const * const restrict, ... );                                                // utility
 s8 * datetime(s8 * const restrict);                                                     // utility
+sem_t csoutput;                                                                         // critical section
 //----------------------------------------------------------------------------------------------------------------------
 void pump(struct sockaddr_in * const restrict addr, const si sock)
 {
@@ -50,11 +52,17 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
         s8 dtbuf[64];
         o("%s > socket accepting\n", datetime(dtbuf));
 
-        socklen_t socklen = sizeof(struct sockaddr_in);
-
         errno = 0;
+        socklen_t socklen = sizeof(struct sockaddr_in);
         const si client_sock = accept(sock, (void *)addr, &socklen);
-        s8 const * const ip = inet_ntoa(addr->sin_addr);
+
+        s8 const * const restrict ip = inet_ntoa(addr->sin_addr);
+
+        if (!ip || strnlen(ip, 16) == 16)
+        {
+            o("%s > inet_ntoa() failed\n", datetime(dtbuf));
+            exit(EXIT_FAILURE);
+        }
 
         if (errno || client_sock == -1)
         {
@@ -68,11 +76,8 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
         if (errno || pid == -1)
         {
             o("%s > fork error: %d (%s)\n", datetime(dtbuf), errno, ip);
-            close(client_sock);
-            continue;
         }
-
-        if (!pid) // child
+        else if (!pid) // child
         {
             u64 recvdata = 0;
 
@@ -186,6 +191,15 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
 //----------------------------------------------------------------------------------------------------------------------
 si main(si argc, s8 ** argv)
 {
+    errno = 0;
+    si res = sem_init(&csoutput, 1, 1);
+
+    if (errno || res == -1)
+    {
+        printf("sem_init() failed: %d\n", errno);
+        return EXIT_FAILURE;
+    }
+
     s8 dtbuf[64];
     o("%s > tinymail v1.0\n", datetime(dtbuf));
 
@@ -216,7 +230,7 @@ si main(si argc, s8 ** argv)
     // socket & TCP options: You may want to change them!
 
     const si off = 0, on = 1;
-    const struct linger li = { 1, 15 }; // enabled, 15 seconds before timeout
+    const struct linger li = { 1, 15 }; // linger on close enabled, 15 seconds before timeout
     const struct timeval tv = { 15, 0 }; // send/recv 15 second timeout
 
     // Pack all of our options into structured arrays so we can loop over them:
@@ -237,7 +251,7 @@ si main(si argc, s8 ** argv)
     for (si i=0;i<options;i++)
     {
         errno = 0;
-        const si res = setsockopt(sock, p[i][0], p[i][1], v[i], p[i][2]);
+        res = setsockopt(sock, p[i][0], p[i][1], v[i], p[i][2]);
 
         if (errno || res == -1)
         {
@@ -249,7 +263,7 @@ si main(si argc, s8 ** argv)
     #undef options
 
     errno = 0;
-    si res = bind(sock, (void *)&addr, sizeof(addr));
+    res = bind(sock, (void *)&addr, sizeof(struct sockaddr_in));
 
     if (errno || res == -1)
     {
@@ -305,21 +319,66 @@ void o(s8 const * const restrict format, ... )
 {
     if (ENABLE_OUTPUT)
     {
+        errno = 0;
+        si res = sem_wait(&csoutput);
+
+        if (errno || res == -1)
+        {
+            printf("sem_wait() failed: %d\n", errno);
+            exit(EXIT_SUCCESS);
+        }
+
         va_list t;
         va_start(t, format);
-        vprintf(format, t);
+        res = vprintf(format, t);
         va_end(t);
+
+        if (res < 0)
+        {
+            printf("vprintf() failed\n");
+            exit(EXIT_SUCCESS);
+        }
+
         fflush(stdout);
+
+        errno = 0;
+        res = sem_post(&csoutput);
+
+        if (errno || res == -1)
+        {
+            printf("sem_post() failed: %d\n", errno);
+            exit(EXIT_SUCCESS);
+        }
     }
 }
 //----------------------------------------------------------------------------------------------------------------------
 s8 * datetime(s8 * const restrict buf)
 {
     struct tm l;
+
+    errno = 0;
     const time_t t = time(0);
-    localtime_r(&t, &l);
-    asctime_r(&l, buf);
+
+    if (errno || t == (time_t)-1)
+    {
+        printf("time() failed: %d\n", errno);
+        exit(EXIT_SUCCESS);
+    }
+
+    if (localtime_r(&t, &l) != &l)
+    {
+        printf("localtime_r() failed\n");
+        exit(EXIT_SUCCESS);
+    }
+
+    if (asctime_r(&l, buf) != buf)
+    {
+        printf("asctime_r() failed\n");
+        exit(EXIT_SUCCESS);
+    }
+
     buf[strlen(buf) - 1] = 0;
+
     return buf;
 }
 //----------------------------------------------------------------------------------------------------------------------
