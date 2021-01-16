@@ -10,6 +10,7 @@ typedef   uint32_t        u32    ;   typedef   int32_t      s32    ;
 typedef   uint64_t        u64    ;   typedef   int64_t      s64    ;
 typedef   __uint128_t     u128   ;   typedef   __int128_t   s128   ;
 typedef   unsigned int    ui     ;   typedef   int          si     ;
+typedef   unsigned long   ul     ;   typedef   long         sl     ;
 typedef   float           r32    ;   typedef   double       r64    ;
 //----------------------------------------------------------------------------------------------------------------------
 #include <errno.h>
@@ -38,10 +39,9 @@ sem_t csoutput;                                                                 
 //----------------------------------------------------------------------------------------------------------------------
 void pump(struct sockaddr_in * const restrict addr, const si sock)
 {
-    errno = 0;
     s8 * const restrict buf = malloc(BUFSIZE);
 
-    if (errno || !buf)
+    if (!buf)
     {
         o("memory could not be allocated\n");
         exit(EXIT_FAILURE);
@@ -56,136 +56,140 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
         socklen_t socklen = sizeof(struct sockaddr_in);
         const si client_sock = accept(sock, (void *)addr, &socklen);
 
-        s8 const * const restrict ip = inet_ntoa(addr->sin_addr);
-
-        if (!ip || strnlen(ip, 16) == 16)
+        if (client_sock == -1)
         {
-            o("%s > inet_ntoa() failed\n", datetime(dtbuf));
-            exit(EXIT_FAILURE);
+            o("%s > accept error: %d\n", datetime(dtbuf), errno);
         }
-
-        if (errno || client_sock == -1)
+        else
         {
-            o("%s > accept error: %d (%s)\n", datetime(dtbuf), errno, ip);
-            continue;
-        }
+            errno = 0;
+            pid_t pid = fork();
 
-        errno = 0;
-        pid_t pid = fork();
-
-        if (errno || pid == -1)
-        {
-            o("%s > fork error: %d (%s)\n", datetime(dtbuf), errno, ip);
-        }
-        else if (!pid) // child
-        {
-            u64 recvdata = 0;
-
-            close(sock);
-
-            o("%s > client with IP %s connected\n", datetime(dtbuf), ip);
-
-            ez_packet(client_sock, "220 computerstuntman.com SMTP tinymail/1.0\r\n", ip);
-
-            si body = 0;
-
-            while (1)
+            if (pid == -1) // error
             {
-                memset(buf, 0, 8);
+                o("%s > fork error: %d\n", datetime(dtbuf), errno);
+                close(client_sock);
+            }
+            else if (!pid) // child
+            {
+                u64 recvdata = 0;
 
-                errno = 0;
-                const ssize_t len = recv(client_sock, buf, BUFSIZE, 0);
+                close(sock);
 
-                if (errno || len == -1)
+                s8 const * const restrict ip = inet_ntoa(addr->sin_addr);
+
+                if (!ip || strnlen(ip, 16) == 16)
                 {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    o("%s > inet_ntoa() failed\n", datetime(dtbuf));
+                    exit(EXIT_FAILURE);
+                }
+
+                o("%s > client with IP %s connected\n", datetime(dtbuf), ip);
+
+                ez_packet(client_sock, "220 computerstuntman.com SMTP tinymail/1.0\r\n", ip);
+
+                si body = 0;
+
+                while (1)
+                {
+                    memset(buf, 0, 8);
+
+                    errno = 0;
+                    const ssize_t len = recv(client_sock, buf, BUFSIZE, 0);
+
+                    if (errno || len == -1)
                     {
-                        o("%s > recv timeout: %s\n", datetime(dtbuf), ip);
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        {
+                            o("%s > recv timeout: %s\n", datetime(dtbuf), ip);
+                        }
+                        else
+                        {
+                            o("%s > recv error: %d (%s)\n", datetime(dtbuf), errno, ip);
+                        }
+                        break;
+                    }
+                    else if (!len)
+                    {
+                        o("%s > orderly close: %s\n", datetime(dtbuf), ip);
+                        break;
                     }
                     else
                     {
-                        o("%s > recv error: %d (%s)\n", datetime(dtbuf), errno, ip);
-                    }
-                    break;
-                }
-                else if (!len)
-                {
-                    o("%s > orderly close: %s\n", datetime(dtbuf), ip);
-                    break;
-                }
-                else
-                {
-                    o("%s > recv %zu bytes from %s\n", datetime(dtbuf), len, ip);
+                        o("%s > recv %zu bytes from %s\n", datetime(dtbuf), len, ip);
 
-                    if ((recvdata += len) >= MAXSIZE)
-                    {
-                        o("closing connection: data exceeded (%"PRIu64" bytes)\n", recvdata);
-                        break;
-                    }
-
-                    if (ENABLE_OUTPUT)
-                    {
-                        fwrite(buf, 1, len, stdout);
-                        o("\n");
-                    }
-
-                    if (body)
-                    {
-                        const s8 END[5] = "\r\n.\r\n";
-
-                        if (len >= sizeof(END))
+                        if ((recvdata += len) >= MAXSIZE)
                         {
-                            if (!memcmp(&buf[len - sizeof(END)], END, sizeof(END)))
+                            o("closing connection: data exceeded (%"PRIu64" bytes)\n", recvdata);
+                            break;
+                        }
+
+                        if (ENABLE_OUTPUT)
+                        {
+                            fwrite(buf, 1, len, stdout);
+                            o("\n");
+                        }
+
+                        if (body)
+                        {
+                            const s8 END[5] = "\r\n.\r\n";
+
+                            if (len >= sizeof(END))
                             {
-                                body = 0;
-                                ez_packet(client_sock, "250 OK\r\n", ip);
+                                if (!memcmp(&buf[len - sizeof(END)], END, sizeof(END)))
+                                {
+                                    body = 0;
+                                    ez_packet(client_sock, "250 OK\r\n", ip);
+                                }
+                            }
+                            else
+                            {
+                                ez_packet(client_sock, "451 Unsupported\r\n", ip);
+                                break;
                             }
                         }
                         else
                         {
-                            ez_packet(client_sock, "451 Unsupported\r\n", ip);
-                            break;
-                        }
-                    }
-                    else
-                    {
-                        if (!strncasecmp(buf, "helo ", 5) || !strncasecmp(buf, "mail ", 5) || !strncasecmp(buf, "rcpt ", 5))
-                        {
-                            o("valid request from %s\n", ip);
-                            ez_packet(client_sock, "250 OK\r\n", ip);
-                        }
-                        else if (!strncasecmp(buf, "ehlo ", 5) || !strncasecmp(buf, "starttls", 8))
-                        {
-                            o("valid request from %s\n", ip);
-                            ez_packet(client_sock, "502 NOT SUPPORTED\r\n", ip);
-                        }
-                        else if (!strncasecmp(buf, "quit\r\n", 6))
-                        {
-                            o("valid request from %s\n", ip);
-                            ez_packet(client_sock, "221 BYE\r\n", ip);
-                            break;
-                        }
-                        else if (!strncasecmp(buf, "data\r\n", 6))
-                        {
-                            o("valid request from %s\n", ip);
-                            ez_packet(client_sock, "354 GO AHEAD\r\n", ip);
-                            body = 1;
-                        }
-                        else
-                        {
-                            o("invalid request from %s\n", ip);
-                            ez_packet(client_sock, "250 OK\r\n", ip);
+                            if (!strncasecmp(buf, "helo ", 5) || !strncasecmp(buf, "mail ", 5) || !strncasecmp(buf, "rcpt ", 5))
+                            {
+                                o("valid request from %s\n", ip);
+                                ez_packet(client_sock, "250 OK\r\n", ip);
+                            }
+                            else if (!strncasecmp(buf, "ehlo ", 5) || !strncasecmp(buf, "starttls", 8))
+                            {
+                                o("valid request from %s\n", ip);
+                                ez_packet(client_sock, "502 NOT SUPPORTED\r\n", ip);
+                            }
+                            else if (!strncasecmp(buf, "quit\r\n", 6))
+                            {
+                                o("valid request from %s\n", ip);
+                                ez_packet(client_sock, "221 BYE\r\n", ip);
+                                break;
+                            }
+                            else if (!strncasecmp(buf, "data\r\n", 6))
+                            {
+                                o("valid request from %s\n", ip);
+                                ez_packet(client_sock, "354 GO AHEAD\r\n", ip);
+                                body = 1;
+                            }
+                            else
+                            {
+                                o("invalid request from %s\n", ip);
+                                ez_packet(client_sock, "250 OK\r\n", ip);
+                            }
                         }
                     }
                 }
+
+                close(client_sock);
+
+                exit(EXIT_SUCCESS);
             }
-
-            close(client_sock);
-
-            exit(EXIT_SUCCESS);
+            else // parent
+            {
+                close(client_sock);
+            }
         }
-
-        close(client_sock);
     }
 }
 //----------------------------------------------------------------------------------------------------------------------
@@ -194,9 +198,9 @@ si main(si argc, s8 ** argv)
     errno = 0;
     si res = sem_init(&csoutput, 1, 1);
 
-    if (errno || res == -1)
+    if (res == -1)
     {
-        printf("sem_init() failed: %d\n", errno);
+        perror("sem_init error");
         return EXIT_FAILURE;
     }
 
@@ -219,9 +223,9 @@ si main(si argc, s8 ** argv)
     errno = 0;
     const si sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
-    if (errno || sock == -1)
+    if (sock == -1)
     {
-        o("socket error: %d\n", errno);
+        perror("socket error");
         return EXIT_FAILURE;
     }
 
@@ -230,8 +234,8 @@ si main(si argc, s8 ** argv)
     // socket & TCP options: You may want to change them!
 
     const si off = 0, on = 1;
-    const struct linger li = { 1, 15 }; // linger on close enabled, 15 seconds before timeout
-    const struct timeval tv = { 15, 0 }; // send/recv 15 second timeout
+    const struct linger li =  {  1, 15 }; // linger on close enabled, 15 seconds before timeout
+    const struct timeval tv = { 15,  0 }; // send/recv 15 second timeout
 
     // Pack all of our options into structured arrays so we can loop over them:
 
@@ -253,9 +257,9 @@ si main(si argc, s8 ** argv)
         errno = 0;
         res = setsockopt(sock, p[i][0], p[i][1], v[i], p[i][2]);
 
-        if (errno || res == -1)
+        if (res == -1)
         {
-            o("setsockopt error: %d\n", errno);
+            perror("setsockopt error");
             return EXIT_FAILURE;
         }
     }
@@ -265,9 +269,9 @@ si main(si argc, s8 ** argv)
     errno = 0;
     res = bind(sock, (void *)&addr, sizeof(struct sockaddr_in));
 
-    if (errno || res == -1)
+    if (res == -1)
     {
-        o("bind error: %d", errno);
+        perror("bind error");
         return EXIT_FAILURE;
     }
 
@@ -276,9 +280,9 @@ si main(si argc, s8 ** argv)
     errno = 0;
     res = listen(sock, MAX_LISTEN);
 
-    if (errno || res == -1)
+    if (res == -1)
     {
-        o("listen error: %d\n", errno);
+        perror("listen error");
         return EXIT_FAILURE;
     }
 
@@ -299,7 +303,7 @@ void ez_packet(const si socket, s8 const * const restrict text, s8 const * const
     errno = 0;
     ssize_t sent = send(socket, text, packet_size, 0);
 
-    if (errno || sent == -1)
+    if (sent == -1)
     {
         o("%s > send error: %d (%s)\n", datetime(dtbuf), errno, ip);
         exit(EXIT_FAILURE);
@@ -322,10 +326,10 @@ void o(s8 const * const restrict format, ... )
         errno = 0;
         si res = sem_wait(&csoutput);
 
-        if (errno || res == -1)
+        if (res == -1)
         {
-            printf("sem_wait() failed: %d\n", errno);
-            exit(EXIT_SUCCESS);
+            perror("sem_wait error");
+            exit(EXIT_FAILURE);
         }
 
         va_list t;
@@ -335,8 +339,8 @@ void o(s8 const * const restrict format, ... )
 
         if (res < 0)
         {
-            printf("vprintf() failed\n");
-            exit(EXIT_SUCCESS);
+            fputs("vprintf error\n", stderr);
+            exit(EXIT_FAILURE);
         }
 
         fflush(stdout);
@@ -344,10 +348,10 @@ void o(s8 const * const restrict format, ... )
         errno = 0;
         res = sem_post(&csoutput);
 
-        if (errno || res == -1)
+        if (res == -1)
         {
-            printf("sem_post() failed: %d\n", errno);
-            exit(EXIT_SUCCESS);
+            perror("sem_post error");
+            exit(EXIT_FAILURE);
         }
     }
 }
@@ -359,22 +363,22 @@ s8 * datetime(s8 * const restrict buf)
     errno = 0;
     const time_t t = time(0);
 
-    if (errno || t == (time_t)-1)
+    if (t == -1)
     {
-        printf("time() failed: %d\n", errno);
-        exit(EXIT_SUCCESS);
+        perror("time error");
+        exit(EXIT_FAILURE);
     }
 
     if (localtime_r(&t, &l) != &l)
     {
-        printf("localtime_r() failed\n");
-        exit(EXIT_SUCCESS);
+        fputs("localtime_r error\n", stderr);
+        exit(EXIT_FAILURE);
     }
 
     if (asctime_r(&l, buf) != buf)
     {
-        printf("asctime_r() failed\n");
-        exit(EXIT_SUCCESS);
+        fputs("asctime_r error\n", stderr);
+        exit(EXIT_FAILURE);
     }
 
     buf[strlen(buf) - 1] = 0;
