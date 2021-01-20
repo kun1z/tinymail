@@ -97,7 +97,7 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
                     errno = 0;
                     const ssize_t len = recv(client_sock, buf, BUFSIZE, 0);
 
-                    if (errno || len == -1)
+                    if (len == -1)
                     {
                         if (errno == EAGAIN || errno == EWOULDBLOCK)
                         {
@@ -107,6 +107,7 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
                         {
                             o("%s > recv error: %d (%s)\n", datetime(dtbuf), errno, ip);
                         }
+
                         break;
                     }
                     else if (!len)
