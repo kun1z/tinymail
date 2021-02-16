@@ -16,6 +16,7 @@ typedef   float                r32    ;   typedef   double       r64    ;
 //----------------------------------------------------------------------------------------------------------------------
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <inttypes.h>
 #include <semaphore.h>
 #include <stdarg.h>
@@ -65,7 +66,7 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
         else
         {
             errno = 0;
-            pid_t pid = fork();
+            const pid_t pid = fork();
 
             if (pid == -1) // error
             {
@@ -95,7 +96,7 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
 
                 if (res == -1)
                 {
-                    o("%s > close(sock) error: %d\n", datetime(dtbuf), errno);
+                    o("%s > close(sock) error: %d (%s)\n", datetime(dtbuf), errno, ip);
                     exit(EXIT_FAILURE);
                 }
 
@@ -227,7 +228,7 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
 
                 if (res == -1)
                 {
-                    o("%s > close(client_sock) error: %d\n", datetime(dtbuf), errno);
+                    o("%s > close(client_sock) error: %d (%s)\n", datetime(dtbuf), errno, ip);
                     exit(EXIT_FAILURE);
                 }
 
@@ -250,18 +251,22 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
 //----------------------------------------------------------------------------------------------------------------------
 si main(si argc, s8 ** argv)
 {
-    signal(SIGCHLD, SIG_IGN); // ignore children when they die
-
-    if ((csoutput = mmap(0, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0)) == MAP_FAILED)
+    errno = 0;
+    if (signal(SIGCHLD, SIG_IGN) == SIG_ERR)
     {
-        o("mmap error\n");
+        perror("signal error");
         return EXIT_FAILURE;
     }
 
     errno = 0;
-    si res = sem_init(csoutput, 1, 1);
+    if ((csoutput = mmap(0, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0)) == MAP_FAILED)
+    {
+        perror("mmap error");
+        return EXIT_FAILURE;
+    }
 
-    if (res == -1)
+    errno = 0;
+    if (sem_init(csoutput, 1, 1) == -1)
     {
         perror("sem_init error");
         return EXIT_FAILURE;
@@ -318,7 +323,7 @@ si main(si argc, s8 ** argv)
     for (si i=0;i<options;i++)
     {
         errno = 0;
-        res = setsockopt(sock, p[i][0], p[i][1], v[i], p[i][2]);
+        const si res = setsockopt(sock, p[i][0], p[i][1], v[i], p[i][2]);
 
         if (res == -1)
         {
@@ -330,7 +335,7 @@ si main(si argc, s8 ** argv)
     #undef options
 
     errno = 0;
-    res = bind(sock, (void *)&addr, sizeof(struct sockaddr_in));
+    si res = bind(sock, (void *)&addr, sizeof(struct sockaddr_in));
 
     if (res == -1)
     {
