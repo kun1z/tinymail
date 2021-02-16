@@ -4,14 +4,15 @@
 static_assert(CHAR_BIT == 8, "ERROR: This code requires [char] to be exactly 8 bits.");
 //----------------------------------------------------------------------------------------------------------------------
 #include <stdint.h>
-typedef   unsigned char   u8     ;   typedef   char         s8     ;
-typedef   uint16_t        u16    ;   typedef   int16_t      s16    ;
-typedef   uint32_t        u32    ;   typedef   int32_t      s32    ;
-typedef   uint64_t        u64    ;   typedef   int64_t      s64    ;
-typedef   __uint128_t     u128   ;   typedef   __int128_t   s128   ;
-typedef   unsigned int    ui     ;   typedef   int          si     ;
-typedef   unsigned long   ul     ;   typedef   long         sl     ;
-typedef   float           r32    ;   typedef   double       r64    ;
+typedef   unsigned char        u8     ;   typedef   char         s8     ;
+typedef   uint16_t             u16    ;   typedef   int16_t      s16    ;
+typedef   uint32_t             u32    ;   typedef   int32_t      s32    ;
+typedef   uint64_t             u64    ;   typedef   int64_t      s64    ;
+typedef   __uint128_t          u128   ;   typedef   __int128_t   s128   ;
+typedef   unsigned int         ui     ;   typedef   int          si     ;
+typedef   unsigned long        ul     ;   typedef   long         sl     ;
+typedef   unsigned long long   ull    ;   typedef   long long    sll    ;
+typedef   float                r32    ;   typedef   double       r64    ;
 //----------------------------------------------------------------------------------------------------------------------
 #include <errno.h>
 #include <fcntl.h>
@@ -35,7 +36,7 @@ void pump(struct sockaddr_in * const restrict, const si);                       
 void ez_packet(const si socket, s8 const * const restrict, s8 const * const restrict);  // smtp ez-send
 void o(s8 const * const restrict, ... );                                                // utility
 s8 * datetime(s8 * const restrict);                                                     // utility
-sem_t csoutput;                                                                         // critical section
+sem_t * csoutput;                                                                         // critical section
 //----------------------------------------------------------------------------------------------------------------------
 void pump(struct sockaddr_in * const restrict addr, const si sock)
 {
@@ -52,8 +53,9 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
         s8 dtbuf[64];
         o("%s > socket accepting\n", datetime(dtbuf));
 
-        errno = 0;
         socklen_t socklen = sizeof(struct sockaddr_in);
+
+        errno = 0;
         const si client_sock = accept(sock, (void *)addr, &socklen);
 
         if (client_sock == -1)
@@ -68,14 +70,18 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
             if (pid == -1) // error
             {
                 o("%s > fork error: %d\n", datetime(dtbuf), errno);
-                close(client_sock);
+
+                errno = 0;
+                const si res = close(client_sock);
+
+                if (res == -1)
+                {
+                    o("%s > close(client_sock) error: %d\n", datetime(dtbuf), errno);
+                    exit(EXIT_FAILURE);
+                }
             }
             else if (!pid) // child
             {
-                u64 recvdata = 0;
-
-                close(sock);
-
                 s8 const * const restrict ip = inet_ntoa(addr->sin_addr);
 
                 if (!ip || strnlen(ip, 16) == 16)
@@ -83,6 +89,17 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
                     o("%s > inet_ntoa() failed\n", datetime(dtbuf));
                     exit(EXIT_FAILURE);
                 }
+
+                errno = 0;
+                si res = close(sock);
+
+                if (res == -1)
+                {
+                    o("%s > close(sock) error: %d\n", datetime(dtbuf), errno);
+                    exit(EXIT_FAILURE);
+                }
+
+                u64 recvdata = 0;
 
                 o("%s > client with IP %s connected\n", datetime(dtbuf), ip);
 
@@ -121,14 +138,37 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
 
                         if ((recvdata += len) >= MAXSIZE)
                         {
-                            o("closing connection: data exceeded (%"PRIu64" bytes)\n", recvdata);
+                            o("closing connection: data exceeded (%"PRIu64" bytes) from %s\n", recvdata, ip);
                             break;
                         }
 
                         if (ENABLE_OUTPUT)
                         {
-                            fwrite(buf, 1, len, stdout);
-                            o("\n");
+                            errno = 0;
+                            res = sem_wait(csoutput);
+
+                            if (res == -1)
+                            {
+                                perror("sem_wait error");
+                                exit(EXIT_FAILURE);
+                            }
+
+                            if (fwrite(buf, 1, len, stdout) != len)
+                            {
+                                puts("fwrite error");
+                                exit(EXIT_FAILURE);
+                            }
+
+                            putchar('\n');
+
+                            errno = 0;
+                            res = sem_post(csoutput);
+
+                            if (res == -1)
+                            {
+                                perror("sem_post error");
+                                exit(EXIT_FAILURE);
+                            }
                         }
 
                         if (body)
@@ -182,13 +222,27 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
                     }
                 }
 
-                close(client_sock);
+                errno = 0;
+                res = close(client_sock);
+
+                if (res == -1)
+                {
+                    o("%s > close(client_sock) error: %d\n", datetime(dtbuf), errno);
+                    exit(EXIT_FAILURE);
+                }
 
                 exit(EXIT_SUCCESS);
             }
             else // parent
             {
-                close(client_sock);
+                errno = 0;
+                const si res = close(client_sock);
+
+                if (res == -1)
+                {
+                    o("%s > close(client_sock) error: %d\n", datetime(dtbuf), errno);
+                    exit(EXIT_FAILURE);
+                }
             }
         }
     }
@@ -196,8 +250,16 @@ void pump(struct sockaddr_in * const restrict addr, const si sock)
 //----------------------------------------------------------------------------------------------------------------------
 si main(si argc, s8 ** argv)
 {
+    signal(SIGCHLD, SIG_IGN); // ignore children when they die
+
+    if ((csoutput = mmap(0, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0)) == MAP_FAILED)
+    {
+        o("mmap error\n");
+        return EXIT_FAILURE;
+    }
+
     errno = 0;
-    si res = sem_init(&csoutput, 1, 1);
+    si res = sem_init(csoutput, 1, 1);
 
     if (res == -1)
     {
@@ -302,7 +364,7 @@ void ez_packet(const si socket, s8 const * const restrict text, s8 const * const
     o("%s", text);
 
     errno = 0;
-    ssize_t sent = send(socket, text, packet_size, 0);
+    const ssize_t sent = send(socket, text, packet_size, 0);
 
     if (sent == -1)
     {
@@ -325,7 +387,7 @@ void o(s8 const * const restrict format, ... )
     if (ENABLE_OUTPUT)
     {
         errno = 0;
-        si res = sem_wait(&csoutput);
+        si res = sem_wait(csoutput);
 
         if (res == -1)
         {
@@ -347,7 +409,7 @@ void o(s8 const * const restrict format, ... )
         fflush(stdout);
 
         errno = 0;
-        res = sem_post(&csoutput);
+        res = sem_post(csoutput);
 
         if (res == -1)
         {
